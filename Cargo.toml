@@ -7,10 +7,6 @@ edition = "2021"
 name = "microsoft_oauth_lib"
 path = "src/lib.rs"
 
-[[bin]]
-name = "microsoft_oauth"
-path = "src/main.rs"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
