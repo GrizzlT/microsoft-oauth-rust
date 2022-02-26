@@ -5,8 +5,12 @@ use crate::auth::TokenResponseError;
 pub enum MicrosoftAuthError {
     #[error("The authentication process returned an empty authorization code")]
     NoAuthCodeReceived,
-    #[error("Received error while requesting token! CAT: {0.error}, DESC: {0.error_description}")]
-    TokenResponseError(TokenResponseError),
+    #[error("Received error while requesting token! Cat: {}, Desc: {}", .cause.error(), .cause.description())]
+    TokenResponseError { cause: TokenResponseError },
+    #[error("XBL could not be authorized!")]
+    XblResponseError,
+    #[error("XSTS could not be authorized!")]
+    XstsResponseError,
     #[error("Could not parse to expected type: {0}")]
     SerdeJson(#[from] serde_json::Error),
     #[error("The authentication process returned an io error: {0}")]

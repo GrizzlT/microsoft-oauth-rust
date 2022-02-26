@@ -6,14 +6,14 @@ use serde::Deserialize;
 use sha2::{Sha256, Digest};
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
-use warp::{Filter, redirect};
-use warp::reply::Response;
+use warp::{Filter, reply};
+use warp::http::StatusCode;
 use crate::error::MicrosoftAuthError;
 
 const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const PASSWORD_LEN: usize = 100;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct MicrosoftAuthData {
     access_token: String,
     refresh_token: String,
@@ -36,18 +36,20 @@ impl MicrosoftAuthData {
     }
 }
 
-pub(crate) async fn authenticate_or_refresh(old_data: Option<&mut MicrosoftAuthData>, client_id: &str, redirect_uri: &str, port: u16, http_client: HttpClient) -> Option<MicrosoftAuthData> {
+/// `redirect_uri` should be https://localhost:<port>
+pub async fn authenticate_or_refresh_microsoft(old_data: &mut Option<MicrosoftAuthData>, client_id: &str, redirect_uri: &str, port: u16, http_client: &HttpClient) -> Result<(), MicrosoftAuthError> {
     match old_data {
         None => {
-            let (code, secret) = retrieve_auth_code(client_id, redirect_uri, port).await?;
+            let (code, secret): (String, String) = retrieve_auth_code(client_id, redirect_uri, port).await?;
             let (access_token, refresh_token) = retrieve_access_token(AuthOrRefresh::Authenticate, &code, Some(secret), client_id, redirect_uri, http_client.clone()).await?;
-            Some(MicrosoftAuthData::new(access_token, refresh_token))
+            *old_data = Some(MicrosoftAuthData::new(access_token, refresh_token));
+            Ok(())
         }
         Some(old_data) => {
-            let (access_token, refresh_token) = retrieve_access_token(AuthOrRefresh::Refresh, &old_data.access_token, None, client_id, redirect_uri, http_client.clone()).await?;
+            let (access_token, refresh_token) = retrieve_access_token(AuthOrRefresh::Refresh, &old_data.refresh_token, None, client_id, redirect_uri, http_client.clone()).await?;
             old_data.access_token = access_token;
             old_data.refresh_token = refresh_token;
-            None
+            Ok(())
         }
     }
 }
@@ -58,7 +60,7 @@ pub(crate) async fn authenticate_or_refresh(old_data: Option<&mut MicrosoftAuthD
 async fn retrieve_auth_code(client_id: &str, redirect_uri: &str, port: u16) -> Result<(String, String), MicrosoftAuthError> {
     let state = generate_secret(7);
     let secret = generate_secret(PASSWORD_LEN);
-    let secret_hash = generate_hash256(&pkce_secret);
+    let secret_hash = generate_hash256(&secret);
     let request_uri = format!("https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_id={}&response_type=code&redirect_uri={}&scope=XboxLive.signin%20offline_access&state={}&code_challenge={}&code_challenge_method=S256", client_id, redirect_uri, state, secret_hash);
 
     let (code_tx, mut code_rx) = tokio::sync::mpsc::channel(1);
@@ -68,7 +70,7 @@ async fn retrieve_auth_code(client_id: &str, redirect_uri: &str, port: u16) -> R
     webbrowser::open(&request_uri)?;
 
     let code = code_rx.recv().await.ok_or(MicrosoftAuthError::NoAuthCodeReceived)?;
-    tokio::time::sleep(Duration::from_millis(20));
+    tokio::time::sleep(Duration::from_millis(20)).await;
     local_server.abort();
     Ok((code, secret))
 }
@@ -93,7 +95,7 @@ async fn retrieve_access_token(auth_or_refresh: AuthOrRefresh, auth_code: &str, 
     ).await?.json::<TokenResponse>().await?;
     match response {
         TokenResponse::Success(data) => Ok((data.access_token, data.refresh_token)),
-        TokenResponse::Error(error) => Err(MicrosoftAuthError::TokenResponseError(error)),
+        TokenResponse::Error(error) => Err(MicrosoftAuthError::TokenResponseError { cause: error }),
     }
 }
 
@@ -116,20 +118,32 @@ pub struct TokenResponseError {
     error_description: String,
 }
 
+impl TokenResponseError {
+    pub fn error(&self) -> &str {
+        &self.error
+    }
+
+    pub fn description(&self) -> &str {
+        &self.error_description
+    }
+}
+
 fn start_localhost(state: String, code_tx: Sender<String>, port: u16) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let warp_filter = warp::path("/")
+        let warp_filter = warp::any()
             .and(warp::query::query::<AuthResponseQuery>())
             .map(move |auth_response: AuthResponseQuery| {
                 if auth_response.state != state {
-                    Response::builder()
-                        .status(400)
-                        .body("Invalid state, malicious redirect?")
+                    reply::with_status(
+                        reply::html("Invalid state, malicious redirect?"),
+                        StatusCode::BAD_REQUEST,
+                    )
                 } else {
-                    code_tx.send(auth_code.code.clone()).await.unwrap();
-                    Response::builder()
-                        .status(200)
-                        .body("Successful authorization! You can close this window.")
+                    code_tx.try_send(auth_response.code.clone()).unwrap();
+                    reply::with_status(
+                        reply::html("Successful authorization! You can close this window."),
+                        StatusCode::OK,
+                    )
                 }
             });
         warp::serve(warp_filter)
