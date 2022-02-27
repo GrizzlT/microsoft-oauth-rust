@@ -1,4 +1,5 @@
 use std::time::Duration;
+use base64ct::Encoding;
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use isahc::http::header::CONTENT_TYPE;
 use rand::Rng;
@@ -188,7 +189,7 @@ fn generate_secret(len: usize) -> String {
 
 fn generate_hash256(secret: &str) -> String {
     let hash = Sha256::digest(<str as AsRef<[u8]>>::as_ref(secret));
-    base64_url::encode(&hash)
+    base64ct::Base64UrlUnpadded::encode_string(&hash)
 }
 
 fn create_html_response(is_success: bool, message: &str, application_name: &str) -> String {
